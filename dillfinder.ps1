@@ -1,6 +1,6 @@
 
 # =========================
-# PROCESS / DLL MONITOR + UI
+# PROCESS / DLL MONITOR + UI + PROGRESS
 # =========================
 
 Add-Type -AssemblyName PresentationFramework
@@ -26,35 +26,46 @@ function BadPath($p) {
 }
 
 # -------------------------
-# Data storage
+# Data
 # -------------------------
 $results = New-Object System.Collections.ObjectModel.ObservableCollection[Object]
 
 # -------------------------
-# UI (WPF Dashboard)
+# UI (WPF)
 # -------------------------
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         Title="Process Monitor Dashboard"
-        Height="600"
-        Width="900"
+        Height="650"
+        Width="950"
         Background="#1E1E1E"
         WindowStartupLocation="CenterScreen">
 
-    <Grid>
+    <Grid Margin="10">
         <Grid.RowDefinitions>
-            <RowDefinition Height="40"/>
+            <RowDefinition Height="25"/>
+            <RowDefinition Height="25"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
-        <TextBlock Text="Live Process / DLL Monitor"
-                   Foreground="White"
-                   FontSize="16"
-                   VerticalAlignment="Center"
-                   Margin="10"/>
+        <!-- STATUS -->
+        <TextBlock Name="StatusText"
+                   Foreground="LightGray"
+                   FontSize="14"
+                   Text="Initializing..."
+                   VerticalAlignment="Center"/>
 
-        <DataGrid Grid.Row="1"
+        <!-- PROGRESS BAR -->
+        <ProgressBar Name="ProgressBar"
+                     Grid.Row="1"
+                     Height="18"
+                     Minimum="0"
+                     Maximum="100"
+                     Value="0"/>
+
+        <!-- TABLE -->
+        <DataGrid Grid.Row="2"
                   Name="Grid"
                   AutoGenerateColumns="True"
                   IsReadOnly="True"
@@ -69,10 +80,13 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $grid = $window.FindName("Grid")
+$statusText = $window.FindName("StatusText")
+$progressBar = $window.FindName("ProgressBar")
+
 $grid.ItemsSource = $results
 
 # -------------------------
-# Add entry function
+# Add result helper
 # -------------------------
 function Add-Result($type, $name, $path, $sig) {
     $results.Add([PSCustomObject]@{
@@ -85,11 +99,35 @@ function Add-Result($type, $name, $path, $sig) {
 }
 
 # -------------------------
-# DLL Scan (javaw modules)
+# PROGRESS SYSTEM
 # -------------------------
-Get-Process javaw -ErrorAction SilentlyContinue | ForEach-Object {
+$global:progress = 0
+$global:stage = "Starting..."
+
+function Set-Progress($value, $text) {
+    $global:progress = $value
+    $global:stage = $text
+
+    $window.Dispatcher.Invoke([action]{
+        $progressBar.Value = $global:progress
+        $statusText.Text = "$($global:stage) ($($global:progress)%)"
+    })
+}
+
+# -------------------------
+# STAGE 1: DLL SCAN
+# -------------------------
+Set-Progress 5 "Scanning DLL modules"
+
+$java = Get-Process javaw -ErrorAction SilentlyContinue
+$total = ($java | Measure-Object).Count
+$current = 0
+
+foreach ($proc in $java) {
+    $current++
+
     try {
-        $_.Modules | ForEach-Object {
+        $proc.Modules | ForEach-Object {
 
             $p = $_.FileName
             if (-not $p) { return }
@@ -101,20 +139,25 @@ Get-Process javaw -ErrorAction SilentlyContinue | ForEach-Object {
             }
         }
     } catch {}
+
+    $percent = 5 + [math]::Round(($current / [math]::Max($total,1)) * 25)
+    Set-Progress $percent "Scanning Java modules"
 }
 
 # -------------------------
-# Process monitoring
+# STAGE 2: PROCESS MONITOR INIT
 # -------------------------
+Set-Progress 35 "Starting process monitor"
+
 try {
     Register-WmiEvent -Class Win32_ProcessStartTrace -SourceIdentifier "procMon" -ErrorAction Stop | Out-Null
 } catch {
-    [System.Windows.MessageBox]::Show("WMI Event failed to start")
+    [System.Windows.MessageBox]::Show("WMI Event failed")
     exit
 }
 
 # -------------------------
-# Background loop
+# BACKGROUND PROCESS LOOP
 # -------------------------
 $job = Start-Job -ScriptBlock {
 
@@ -145,13 +188,17 @@ $job = Start-Job -ScriptBlock {
 }
 
 # -------------------------
-# UI update timer
+# UI UPDATE LOOP
 # -------------------------
 $timer = New-Object System.Windows.Threading.DispatcherTimer
-$timer.Interval = [TimeSpan]::FromSeconds(2)
+$timer.Interval = [TimeSpan]::FromSeconds(1)
 
 $timer.Add_Tick({
-    if ($job -and $job.State -eq "Running") {
+
+    if ($job.State -eq "Running") {
+
+        Set-Progress ([math]::Min($global:progress + 1, 100)) $global:stage
+
         $output = Receive-Job $job -Keep -ErrorAction SilentlyContinue
 
         foreach ($item in $output) {
@@ -159,17 +206,25 @@ $timer.Add_Tick({
                 $results.Add($item)
             }
         }
+
+        if ($global:progress -ge 100) {
+            Set-Progress 100 "Monitoring active"
+        }
     }
 })
 
 $timer.Start()
 
 # -------------------------
-# Start UI
+# CLEAN EXIT
 # -------------------------
 $window.Add_Closing({
     Stop-Job $job -ErrorAction SilentlyContinue
     Remove-Job $job -ErrorAction SilentlyContinue
 })
 
+# -------------------------
+# SHOW UI
+# -------------------------
+Set-Progress 100 "Ready"
 $window.ShowDialog()
