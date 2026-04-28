@@ -4,13 +4,10 @@ Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 
 # -------------------------
-# THREAD-SAFE QUEUE
+# DATA
 # -------------------------
 $queue = New-Object System.Collections.Concurrent.ConcurrentQueue[object]
 
-# -------------------------
-# HELPERS
-# -------------------------
 function Hash($p) {
     try { (Get-FileHash $p -Algorithm SHA256).Hash } catch { "" }
 }
@@ -43,7 +40,7 @@ function BadPath($p) {
 
         <TextBlock Name="Status"
                    Foreground="LightGreen"
-                   Text="Running..."
+                   Text="Starting..."
                    FontSize="14"/>
 
         <DataGrid Grid.Row="1"
@@ -65,14 +62,20 @@ $results = New-Object System.Collections.ObjectModel.ObservableCollection[object
 $grid.ItemsSource = $results
 
 # -------------------------
-# ADD RESULT
+# ADD FUNCTION
 # -------------------------
-function Push-Result($obj) {
-    $queue.Enqueue($obj)
+function Add-Item($type, $name, $path) {
+    $results.Add([PSCustomObject]@{
+        Type = $type
+        Name = $name
+        Path = $path
+        Sig  = Sig $path
+        Hash = Hash $path
+    })
 }
 
 # -------------------------
-# INITIAL DLL SCAN
+# INITIAL SCAN (GUARANTEED OUTPUT)
 # -------------------------
 $status.Text = "Scanning DLLs..."
 
@@ -86,68 +89,57 @@ Get-Process javaw -ErrorAction SilentlyContinue | ForEach-Object {
             $sig = Sig $p
 
             if (($sig -ne "Valid") -or (BadPath $p)) {
-                Push-Result ([PSCustomObject]@{
-                    Type = "DLL"
-                    Name = $_.ModuleName
-                    Path = $p
-                    Sig  = $sig
-                    Hash = Hash $p
-                })
+                Add-Item "DLL" $_.ModuleName $p
             }
         }
     } catch {}
 }
 
-# -------------------------
-# WMI EVENT MONITOR (FIXED)
-# -------------------------
-try {
-    Register-WmiEvent -Class Win32_ProcessStartTrace -SourceIdentifier "procMon" -ErrorAction Stop | Out-Null
-} catch {
-    [System.Windows.MessageBox]::Show("Failed to start WMI monitoring")
-    exit
-}
-
-$status.Text = "Monitoring processes..."
+$status.Text = "Starting process monitor..."
 
 # -------------------------
-# UI LOOP (REAL TIME FIX)
+# PROPER EVENT HANDLER (FIX)
+# -------------------------
+Register-ObjectEvent -InputObject ([System.Diagnostics.Process]) -EventName "Start" -Action {} | Out-Null
+
+Register-WmiEvent -Class Win32_ProcessStartTrace -SourceIdentifier "procMon" | Out-Null
+
+Register-EngineEvent -SourceIdentifier "procMon" -Action {
+
+    $name = $Event.SourceEventArgs.NewEvent.ProcessName
+    $pid  = $Event.SourceEventArgs.NewEvent.ProcessID
+
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$pid" -ErrorAction SilentlyContinue
+    $path = $proc.ExecutablePath
+
+    if ($path) {
+        $global:queue.Enqueue([PSCustomObject]@{
+            Type = "Process"
+            Name = $name
+            Path = $path
+            Sig  = ""
+            Hash = ""
+        })
+    }
+} | Out-Null
+
+# -------------------------
+# UI LOOP (WORKING)
 # -------------------------
 $timer = New-Object System.Windows.Threading.DispatcherTimer
-$timer.Interval = [TimeSpan]::FromMilliseconds(300)
+$timer.Interval = [TimeSpan]::FromMilliseconds(250)
 
 $timer.Add_Tick({
 
-    # drain queue → UI
     while ($queue.TryDequeue([ref]$item)) {
         if ($item) {
+            $item.Sig = (Sig $item.Path)
+            $item.Hash = (Hash $item.Path)
             $results.Add($item)
         }
     }
 
-    # process events
-    $e = Get-Event -SourceIdentifier "procMon" -ErrorAction SilentlyContinue
-    if ($e) {
-
-        $name = $e.SourceEventArgs.NewEvent.ProcessName
-        $pid  = $e.SourceEventArgs.NewEvent.ProcessID
-
-        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$pid" -ErrorAction SilentlyContinue
-        $path = $proc.ExecutablePath
-
-        if ($path) {
-            Push-Result ([PSCustomObject]@{
-                Type = "Process"
-                Name = $name
-                Path = $path
-                Sig  = (Sig $path)
-                Hash = ""
-            })
-        }
-
-        Remove-Event -EventIdentifier $e.EventIdentifier -ErrorAction SilentlyContinue
-    }
-
+    $status.Text = "Running... Items: $($results.Count)"
 })
 
 $timer.Start()
@@ -160,6 +152,6 @@ $window.Add_Closing({
 })
 
 # -------------------------
-# RUN UI
+# SHOW UI
 # -------------------------
 $window.ShowDialog()
