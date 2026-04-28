@@ -1,20 +1,38 @@
-# Check DLLs loaded into javaw.exe (possible injection traces)
+# Run as Admin
 
-$javawProcs = Get-Process javaw -ErrorAction SilentlyContinue
+function Hash($p) {
+try { return (Get-FileHash $p -Algorithm SHA256).Hash } catch { return "" }
+}
 
-foreach ($proc in $javawProcs) {
+function Sig($p) {
+try { return (Get-AuthenticodeSignature $p).Status } catch { return "Unknown" }
+}
+
+function BadPath($p) {
+if (-not $p) { return $false }
+$p = $p.ToLower()
+return ($p -match 'appdata|temp|downloads|desktop')
+}
+
+$results = @()
+
+# --- Scan javaw modules (DLL injection traces)
+
+Get-Process javaw -ErrorAction SilentlyContinue | ForEach-Object {
 try {
-foreach ($mod in $proc.Modules) {
-$path = $mod.FileName
-if (-not $path) { continue }
+$*.Modules | ForEach-Object {
+$p = $*.FileName
+if (-not $p) { return }
 
 ```
-        $sig = Sig $path
-        if ($sig -ne "Valid" -or IsBadPath $path) {
+        $sig = Sig $p
+        if ($sig -ne "Valid" -or BadPath $p) {
             $results += [PSCustomObject]@{
-                Name = $mod.ModuleName
-                Path = $path
+                Type = "DLL"
+                Name = $_.ModuleName
+                Path = $p
                 Sig  = $sig
+                Hash = Hash $p
             }
         }
     }
@@ -23,8 +41,39 @@ if (-not $path) { continue }
 
 }
 
-$results = $results | Sort-Object Path -Unique
+# --- Real-time process monitor (WMI)
 
-if ($results) {
-$results | Out-GridView -Title "Suspicious EXEs / DLLs (javaw)"
+Register-WmiEvent -Class Win32_ProcessStartTrace -SourceIdentifier "procMon" | Out-Null
+
+Write-Host "Monitoring started... open Minecraft now."
+
+while ($true) {
+$e = Wait-Event -SourceIdentifier "procMon"
+$name = $e.SourceEventArgs.NewEvent.ProcessName
+
+```
+if ($name -like "*.exe") {
+    $proc = Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -eq $e.SourceEventArgs.NewEvent.ProcessID }
+    $path = $proc.ExecutablePath
+
+    if ($path) {
+        $sig = Sig $path
+
+        if ($sig -ne "Valid" -or BadPath $path) {
+            $results += [PSCustomObject]@{
+                Type = "Process"
+                Name = $name
+                Path = $path
+                Sig  = $sig
+                Hash = Hash $path
+            }
+
+            $results | Out-GridView -Title "Live Detection"
+        }
+    }
+}
+
+Remove-Event -EventIdentifier $e.EventIdentifier
+```
+
 }
