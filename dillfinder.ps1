@@ -6,48 +6,72 @@ Add-Type -AssemblyName WindowsBase
 # -------------------------
 # DATA
 # -------------------------
-$queue = New-Object System.Collections.Concurrent.ConcurrentQueue[object]
+$allProcesses = New-Object System.Collections.ObjectModel.ObservableCollection[object]
+$viewData = New-Object System.Collections.ObjectModel.ObservableCollection[object]
 
-function Hash($p) {
-    try { (Get-FileHash $p -Algorithm SHA256).Hash } catch { "" }
+# -------------------------
+# HELPERS
+# -------------------------
+function Get-ParentMap {
+    $map = @{}
+    Get-CimInstance Win32_Process | ForEach-Object {
+        $map[$_.ProcessId] = $_.ParentProcessId
+    }
+    return $map
 }
 
-function Sig($p) {
-    try { (Get-AuthenticodeSignature $p).Status } catch { "Unknown" }
-}
+function Is-Suspicious($p) {
+    $path = $p.Path.ToLower()
 
-function BadPath($p) {
-    if (-not $p) { return $false }
-    $p = $p.ToLower()
-    return ($p -match "appdata|temp|downloads|desktop")
+    return (
+        $path -match "temp|appdata|downloads|desktop" -or
+        $p.CPU -gt 80
+    )
 }
 
 # -------------------------
-# UI
+# UI (WPF)
 # -------------------------
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        Title="Live Monitor"
-        Height="650"
-        Width="950"
+        Title="Live Process Dashboard"
+        Height="700"
+        Width="1100"
         Background="#1E1E1E">
 
     <Grid Margin="10">
         <Grid.RowDefinitions>
-            <RowDefinition Height="25"/>
+            <RowDefinition Height="35"/>
+            <RowDefinition Height="35"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
-        <TextBlock Name="Status"
-                   Foreground="LightGreen"
-                   Text="Starting..."
-                   FontSize="14"/>
+        <!-- SEARCH -->
+        <TextBox Name="SearchBox"
+                 Grid.Row="0"
+                 Height="25"
+                 Background="#2D2D30"
+                 Foreground="White"
+                 Text=""/>
 
-        <DataGrid Grid.Row="1"
-                  Name="Grid"
+        <!-- BUTTONS -->
+        <StackPanel Grid.Row="1" Orientation="Horizontal">
+
+            <Button Name="ExportBtn"
+                    Content="Export CSV"
+                    Width="120"
+                    Margin="0,0,10,0"/>
+
+        </StackPanel>
+
+        <!-- GRID -->
+        <DataGrid Name="Grid"
+                  Grid.Row="2"
                   AutoGenerateColumns="True"
                   Background="#252526"
-                  Foreground="White"/>
+                  Foreground="White"
+                  IsReadOnly="True"/>
+
     </Grid>
 </Window>
 "@
@@ -56,100 +80,96 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $grid = $window.FindName("Grid")
-$status = $window.FindName("Status")
+$search = $window.FindName("SearchBox")
+$exportBtn = $window.FindName("ExportBtn")
 
-$results = New-Object System.Collections.ObjectModel.ObservableCollection[object]
-$grid.ItemsSource = $results
-
-# -------------------------
-# ADD FUNCTION
-# -------------------------
-function Add-Item($type, $name, $path) {
-    $results.Add([PSCustomObject]@{
-        Type = $type
-        Name = $name
-        Path = $path
-        Sig  = Sig $path
-        Hash = Hash $path
-    })
-}
+$grid.ItemsSource = $viewData
 
 # -------------------------
-# INITIAL SCAN (GUARANTEED OUTPUT)
+# LOAD LOOP (REAL WORKING)
 # -------------------------
-$status.Text = "Scanning DLLs..."
+function Refresh-Processes {
 
-Get-Process javaw -ErrorAction SilentlyContinue | ForEach-Object {
-    try {
-        $_.Modules | ForEach-Object {
+    $parentMap = Get-ParentMap
 
-            $p = $_.FileName
-            if (-not $p) { return }
+    $processes = Get-Process | ForEach-Object {
 
-            $sig = Sig $p
+        $cpu = 0
+        try { $cpu = $_.CPU } catch {}
 
-            if (($sig -ne "Valid") -or (BadPath $p)) {
-                Add-Item "DLL" $_.ModuleName $p
-            }
+        $path = ""
+        try { $path = $_.Path } catch {}
+
+        [PSCustomObject]@{
+            Name   = $_.ProcessName
+            PID    = $_.Id
+            Parent = $parentMap[$_.Id]
+            CPU    = [math]::Round($cpu,2)
+            RAM    = [math]::Round($_.WorkingSet64 / 1MB,2)
+            Path   = $path
+            Flag   = ""
         }
-    } catch {}
+    }
+
+    $viewData.Clear()
+
+    foreach ($p in $processes) {
+
+        $flag = Is-Suspicious $p
+        $p.Flag = if ($flag) { "RED" } else { "OK" }
+
+        $viewData.Add($p)
+    }
 }
 
-$status.Text = "Starting process monitor..."
-
 # -------------------------
-# PROPER EVENT HANDLER (FIX)
+# SEARCH FILTER
 # -------------------------
-Register-ObjectEvent -InputObject ([System.Diagnostics.Process]) -EventName "Start" -Action {} | Out-Null
+$search.Add_TextChanged({
+    $text = $search.Text.ToLower()
 
-Register-WmiEvent -Class Win32_ProcessStartTrace -SourceIdentifier "procMon" | Out-Null
+    $viewData.Clear()
 
-Register-EngineEvent -SourceIdentifier "procMon" -Action {
+    Get-Process | ForEach-Object {
 
-    $name = $Event.SourceEventArgs.NewEvent.ProcessName
-    $pid  = $Event.SourceEventArgs.NewEvent.ProcessID
+        $cpu = $_.CPU
+        $path = $_.Path
 
-    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$pid" -ErrorAction SilentlyContinue
-    $path = $proc.ExecutablePath
-
-    if ($path) {
-        $global:queue.Enqueue([PSCustomObject]@{
-            Type = "Process"
-            Name = $name
+        $obj = [PSCustomObject]@{
+            Name = $_.ProcessName
+            PID  = $_.Id
+            CPU  = [math]::Round($cpu,2)
+            RAM  = [math]::Round($_.WorkingSet64 / 1MB,2)
             Path = $path
-            Sig  = ""
-            Hash = ""
-        })
+            Flag = ""
+        }
+
+        if ($obj.Name.ToLower().Contains($text)) {
+            $viewData.Add($obj)
+        }
     }
-} | Out-Null
+})
 
 # -------------------------
-# UI LOOP (WORKING)
+# EXPORT BUTTON
+# -------------------------
+$exportBtn.Add_Click({
+    $path = "$env:USERPROFILE\Desktop\process_report.csv"
+    $viewData | Export-Csv -Path $path -NoTypeInformation
+    [System.Windows.MessageBox]::Show("Exported to Desktop")
+})
+
+# -------------------------
+# LIVE TIMER
 # -------------------------
 $timer = New-Object System.Windows.Threading.DispatcherTimer
-$timer.Interval = [TimeSpan]::FromMilliseconds(250)
+$timer.Interval = [TimeSpan]::FromSeconds(1)
 
 $timer.Add_Tick({
-
-    while ($queue.TryDequeue([ref]$item)) {
-        if ($item) {
-            $item.Sig = (Sig $item.Path)
-            $item.Hash = (Hash $item.Path)
-            $results.Add($item)
-        }
-    }
-
-    $status.Text = "Running... Items: $($results.Count)"
+    Refresh-Processes
 })
 
 $timer.Start()
-
-# -------------------------
-# CLEAN EXIT
-# -------------------------
-$window.Add_Closing({
-    Unregister-Event -SourceIdentifier "procMon" -ErrorAction SilentlyContinue
-})
 
 # -------------------------
 # SHOW UI
