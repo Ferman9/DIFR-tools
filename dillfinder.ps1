@@ -1,16 +1,16 @@
 
-# =========================
-# PROCESS / DLL MONITOR + UI + PROGRESS
-# =========================
-
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 
 # -------------------------
-# Helpers
+# THREAD-SAFE QUEUE
 # -------------------------
+$queue = New-Object System.Collections.Concurrent.ConcurrentQueue[object]
 
+# -------------------------
+# HELPERS
+# -------------------------
 function Hash($p) {
     try { (Get-FileHash $p -Algorithm SHA256).Hash } catch { "" }
 }
@@ -26,52 +26,31 @@ function BadPath($p) {
 }
 
 # -------------------------
-# Data
+# UI
 # -------------------------
-$results = New-Object System.Collections.ObjectModel.ObservableCollection[Object]
-
-# -------------------------
-# UI (WPF)
-# -------------------------
-
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        Title="Process Monitor Dashboard"
+        Title="Live Monitor"
         Height="650"
         Width="950"
-        Background="#1E1E1E"
-        WindowStartupLocation="CenterScreen">
+        Background="#1E1E1E">
 
     <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="25"/>
-            <RowDefinition Height="25"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
-        <!-- STATUS -->
-        <TextBlock Name="StatusText"
-                   Foreground="LightGray"
-                   FontSize="14"
-                   Text="Initializing..."
-                   VerticalAlignment="Center"/>
+        <TextBlock Name="Status"
+                   Foreground="LightGreen"
+                   Text="Running..."
+                   FontSize="14"/>
 
-        <!-- PROGRESS BAR -->
-        <ProgressBar Name="ProgressBar"
-                     Grid.Row="1"
-                     Height="18"
-                     Minimum="0"
-                     Maximum="100"
-                     Value="0"/>
-
-        <!-- TABLE -->
-        <DataGrid Grid.Row="2"
+        <DataGrid Grid.Row="1"
                   Name="Grid"
                   AutoGenerateColumns="True"
-                  IsReadOnly="True"
                   Background="#252526"
-                  Foreground="White"
-                  BorderThickness="0"/>
+                  Foreground="White"/>
     </Grid>
 </Window>
 "@
@@ -80,54 +59,26 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $grid = $window.FindName("Grid")
-$statusText = $window.FindName("StatusText")
-$progressBar = $window.FindName("ProgressBar")
+$status = $window.FindName("Status")
 
+$results = New-Object System.Collections.ObjectModel.ObservableCollection[object]
 $grid.ItemsSource = $results
 
 # -------------------------
-# Add result helper
+# ADD RESULT
 # -------------------------
-function Add-Result($type, $name, $path, $sig) {
-    $results.Add([PSCustomObject]@{
-        Type = $type
-        Name = $name
-        Path = $path
-        Sig  = $sig
-        Hash = Hash $path
-    })
+function Push-Result($obj) {
+    $queue.Enqueue($obj)
 }
 
 # -------------------------
-# PROGRESS SYSTEM
+# INITIAL DLL SCAN
 # -------------------------
-$global:progress = 0
-$global:stage = "Starting..."
+$status.Text = "Scanning DLLs..."
 
-function Set-Progress($value, $text) {
-    $global:progress = $value
-    $global:stage = $text
-
-    $window.Dispatcher.Invoke([action]{
-        $progressBar.Value = $global:progress
-        $statusText.Text = "$($global:stage) ($($global:progress)%)"
-    })
-}
-
-# -------------------------
-# STAGE 1: DLL SCAN
-# -------------------------
-Set-Progress 5 "Scanning DLL modules"
-
-$java = Get-Process javaw -ErrorAction SilentlyContinue
-$total = ($java | Measure-Object).Count
-$current = 0
-
-foreach ($proc in $java) {
-    $current++
-
+Get-Process javaw -ErrorAction SilentlyContinue | ForEach-Object {
     try {
-        $proc.Modules | ForEach-Object {
+        $_.Modules | ForEach-Object {
 
             $p = $_.FileName
             if (-not $p) { return }
@@ -135,82 +86,68 @@ foreach ($proc in $java) {
             $sig = Sig $p
 
             if (($sig -ne "Valid") -or (BadPath $p)) {
-                Add-Result "DLL" $_.ModuleName $p $sig
+                Push-Result ([PSCustomObject]@{
+                    Type = "DLL"
+                    Name = $_.ModuleName
+                    Path = $p
+                    Sig  = $sig
+                    Hash = Hash $p
+                })
             }
         }
     } catch {}
-
-    $percent = 5 + [math]::Round(($current / [math]::Max($total,1)) * 25)
-    Set-Progress $percent "Scanning Java modules"
 }
 
 # -------------------------
-# STAGE 2: PROCESS MONITOR INIT
+# WMI EVENT MONITOR (FIXED)
 # -------------------------
-Set-Progress 35 "Starting process monitor"
-
 try {
     Register-WmiEvent -Class Win32_ProcessStartTrace -SourceIdentifier "procMon" -ErrorAction Stop | Out-Null
 } catch {
-    [System.Windows.MessageBox]::Show("WMI Event failed")
+    [System.Windows.MessageBox]::Show("Failed to start WMI monitoring")
     exit
 }
 
-# -------------------------
-# BACKGROUND PROCESS LOOP
-# -------------------------
-$job = Start-Job -ScriptBlock {
+$status.Text = "Monitoring processes..."
 
-    Register-WmiEvent -Class Win32_ProcessStartTrace -SourceIdentifier "procMon" | Out-Null
+# -------------------------
+# UI LOOP (REAL TIME FIX)
+# -------------------------
+$timer = New-Object System.Windows.Threading.DispatcherTimer
+$timer.Interval = [TimeSpan]::FromMilliseconds(300)
 
-    while ($true) {
-        $e = Wait-Event -SourceIdentifier "procMon" -Timeout 5
-        if (-not $e) { continue }
+$timer.Add_Tick({
+
+    # drain queue → UI
+    while ($queue.TryDequeue([ref]$item)) {
+        if ($item) {
+            $results.Add($item)
+        }
+    }
+
+    # process events
+    $e = Get-Event -SourceIdentifier "procMon" -ErrorAction SilentlyContinue
+    if ($e) {
 
         $name = $e.SourceEventArgs.NewEvent.ProcessName
-        $processId = $e.SourceEventArgs.NewEvent.ProcessID
+        $pid  = $e.SourceEventArgs.NewEvent.ProcessID
 
-        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction SilentlyContinue
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$pid" -ErrorAction SilentlyContinue
         $path = $proc.ExecutablePath
 
         if ($path) {
-            [PSCustomObject]@{
+            Push-Result ([PSCustomObject]@{
                 Type = "Process"
                 Name = $name
                 Path = $path
-                Sig  = (try { (Get-AuthenticodeSignature $path).Status } catch { "Unknown" })
+                Sig  = (Sig $path)
                 Hash = ""
-            }
+            })
         }
 
         Remove-Event -EventIdentifier $e.EventIdentifier -ErrorAction SilentlyContinue
     }
-}
 
-# -------------------------
-# UI UPDATE LOOP
-# -------------------------
-$timer = New-Object System.Windows.Threading.DispatcherTimer
-$timer.Interval = [TimeSpan]::FromSeconds(1)
-
-$timer.Add_Tick({
-
-    if ($job.State -eq "Running") {
-
-        Set-Progress ([math]::Min($global:progress + 1, 100)) $global:stage
-
-        $output = Receive-Job $job -Keep -ErrorAction SilentlyContinue
-
-        foreach ($item in $output) {
-            if ($item) {
-                $results.Add($item)
-            }
-        }
-
-        if ($global:progress -ge 100) {
-            Set-Progress 100 "Monitoring active"
-        }
-    }
 })
 
 $timer.Start()
@@ -219,12 +156,10 @@ $timer.Start()
 # CLEAN EXIT
 # -------------------------
 $window.Add_Closing({
-    Stop-Job $job -ErrorAction SilentlyContinue
-    Remove-Job $job -ErrorAction SilentlyContinue
+    Unregister-Event -SourceIdentifier "procMon" -ErrorAction SilentlyContinue
 })
 
 # -------------------------
-# SHOW UI
+# RUN UI
 # -------------------------
-Set-Progress 100 "Ready"
 $window.ShowDialog()
