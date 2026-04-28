@@ -1,55 +1,108 @@
-# Process Audit Logger (Safe Version)
+# Run as Admin recommended
 
-$logPath = "$env:USERPROFILE\Desktop\proc_log.csv"
+function Hash($p) {
+    try { return (Get-FileHash $p -Algorithm SHA256).Hash }
+    catch { return "" }
+}
+
+function Sig($p) {
+    try { return (Get-AuthenticodeSignature $p).Status }
+    catch { return "Unknown" }
+}
+
+function BadPath($p) {
+    if (-not $p) { return $false }
+    $p = $p.ToLower()
+    return ($p -match "appdata|temp|downloads|desktop")
+}
+
 $results = @()
 
-function Get-Hash($p) {
-    try { (Get-FileHash $p -Algorithm SHA256).Hash } catch { "" }
+Write-Host "[*] Starting scan..." -ForegroundColor Cyan
+
+# -----------------------------
+# Scan javaw modules (DLLs)
+# -----------------------------
+Get-Process javaw -ErrorAction SilentlyContinue | ForEach-Object {
+    try {
+        $_.Modules | ForEach-Object {
+
+            $p = $_.FileName
+            if (-not $p) { return }
+
+            $sig = Sig $p
+
+            if (($sig -ne "Valid") -or (BadPath $p)) {
+                $results += [PSCustomObject]@{
+                    Type = "DLL"
+                    Name = $_.ModuleName
+                    Path = $p
+                    Sig  = $sig
+                    Hash = Hash $p
+                }
+            }
+        }
+    }
+    catch {}
 }
 
-function Get-Signature($p) {
-    try { (Get-AuthenticodeSignature $p).Status } catch { "Unknown" }
+# -----------------------------
+# Process monitor (WMI)
+# -----------------------------
+try {
+    Register-WmiEvent -Class Win32_ProcessStartTrace -SourceIdentifier "procMon" -ErrorAction Stop | Out-Null
+}
+catch {
+    Write-Host "[!] WMI event failed to register" -ForegroundColor Red
+    return
 }
 
-# Create log file header
-if (!(Test-Path $logPath)) {
-    "Time,PID,ParentPID,Name,Path,Signature,Hash" | Out-File $logPath
-}
+Write-Host "[*] Monitoring processes... (Ctrl+C to stop)" -ForegroundColor Green
 
-# Track processes
-Register-WmiEvent -Class Win32_ProcessStartTrace -SourceIdentifier "procStart" | Out-Null
+$lastPopup = Get-Date "2000-01-01"
 
-Write-Host "Process audit started..."
+try {
+    while ($true) {
 
-while ($true) {
-    $event = Wait-Event -SourceIdentifier "procStart"
+        $e = Wait-Event -SourceIdentifier "procMon" -Timeout 5
+        if (-not $e) { continue }
 
-    $pid = $event.SourceEventArgs.NewEvent.ProcessID
-    $ppid = $event.SourceEventArgs.NewEvent.ParentProcessID
-    $name = $event.SourceEventArgs.NewEvent.ProcessName
+        $name = $e.SourceEventArgs.NewEvent.ProcessName
+        $pid  = $e.SourceEventArgs.NewEvent.ProcessID
 
-    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$pid"
+        if ($name -like "*.exe") {
 
-    if ($proc) {
-        $path = $proc.ExecutablePath
-        $sig = Get-Signature $path
-        $hash = Get-Hash $path
+            $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$pid" -ErrorAction SilentlyContinue
+            $path = $proc.ExecutablePath
 
-        $entry = [PSCustomObject]@{
-            Time = Get-Date
-            PID = $pid
-            ParentPID = $ppid
-            Name = $name
-            Path = $path
-            Signature = $sig
-            Hash = $hash
+            if ($path) {
+                $sig = Sig $path
+
+                if (($sig -ne "Valid") -or (BadPath $path)) {
+
+                    $obj = [PSCustomObject]@{
+                        Type = "Process"
+                        Name = $name
+                        Path = $path
+                        Sig  = $sig
+                        Hash = Hash $path
+                    }
+
+                    $results += $obj
+
+                    # throttle popup spam (max once every 5 seconds)
+                    if ((Get-Date) - $lastPopup -gt (New-TimeSpan -Seconds 5)) {
+                        $results | Out-GridView -Title "Live Detection"
+                        $lastPopup = Get-Date
+                    }
+                }
+            }
         }
 
-        $results += $entry
-
-        # append to CSV
-        "$($entry.Time),$pid,$ppid,$name,$path,$sig,$hash" | Add-Content $logPath
+        Remove-Event -EventIdentifier $e.EventIdentifier -ErrorAction SilentlyContinue
     }
-
-    Remove-Event -EventIdentifier $event.EventIdentifier
+}
+finally {
+    Write-Host "`n[*] Cleaning up..." -ForegroundColor Yellow
+    Unregister-Event -SourceIdentifier "procMon" -ErrorAction SilentlyContinue
 }
