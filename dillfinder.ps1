@@ -1,13 +1,22 @@
-# Run as Admin recommended
+
+# =========================
+# PROCESS / DLL MONITOR + UI
+# =========================
+
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
+
+# -------------------------
+# Helpers
+# -------------------------
 
 function Hash($p) {
-    try { return (Get-FileHash $p -Algorithm SHA256).Hash }
-    catch { return "" }
+    try { (Get-FileHash $p -Algorithm SHA256).Hash } catch { "" }
 }
 
 function Sig($p) {
-    try { return (Get-AuthenticodeSignature $p).Status }
-    catch { return "Unknown" }
+    try { (Get-AuthenticodeSignature $p).Status } catch { "Unknown" }
 }
 
 function BadPath($p) {
@@ -16,13 +25,68 @@ function BadPath($p) {
     return ($p -match "appdata|temp|downloads|desktop")
 }
 
-$results = @()
+# -------------------------
+# Data storage
+# -------------------------
+$results = New-Object System.Collections.ObjectModel.ObservableCollection[Object]
 
-Write-Host "[*] Starting scan..." -ForegroundColor Cyan
+# -------------------------
+# UI (WPF Dashboard)
+# -------------------------
 
-# -----------------------------
-# Scan javaw modules (DLLs)
-# -----------------------------
+[xml]$xaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        Title="Process Monitor Dashboard"
+        Height="600"
+        Width="900"
+        Background="#1E1E1E"
+        WindowStartupLocation="CenterScreen">
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="40"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Text="Live Process / DLL Monitor"
+                   Foreground="White"
+                   FontSize="16"
+                   VerticalAlignment="Center"
+                   Margin="10"/>
+
+        <DataGrid Grid.Row="1"
+                  Name="Grid"
+                  AutoGenerateColumns="True"
+                  IsReadOnly="True"
+                  Background="#252526"
+                  Foreground="White"
+                  BorderThickness="0"/>
+    </Grid>
+</Window>
+"@
+
+$reader = New-Object System.Xml.XmlNodeReader $xaml
+$window = [Windows.Markup.XamlReader]::Load($reader)
+
+$grid = $window.FindName("Grid")
+$grid.ItemsSource = $results
+
+# -------------------------
+# Add entry function
+# -------------------------
+function Add-Result($type, $name, $path, $sig) {
+    $results.Add([PSCustomObject]@{
+        Type = $type
+        Name = $name
+        Path = $path
+        Sig  = $sig
+        Hash = Hash $path
+    })
+}
+
+# -------------------------
+# DLL Scan (javaw modules)
+# -------------------------
 Get-Process javaw -ErrorAction SilentlyContinue | ForEach-Object {
     try {
         $_.Modules | ForEach-Object {
@@ -33,76 +97,79 @@ Get-Process javaw -ErrorAction SilentlyContinue | ForEach-Object {
             $sig = Sig $p
 
             if (($sig -ne "Valid") -or (BadPath $p)) {
-                $results += [PSCustomObject]@{
-                    Type = "DLL"
-                    Name = $_.ModuleName
-                    Path = $p
-                    Sig  = $sig
-                    Hash = Hash $p
-                }
+                Add-Result "DLL" $_.ModuleName $p $sig
             }
         }
-    }
-    catch {}
+    } catch {}
 }
 
-# -----------------------------
-# Process monitor (WMI)
-# -----------------------------
+# -------------------------
+# Process monitoring
+# -------------------------
 try {
     Register-WmiEvent -Class Win32_ProcessStartTrace -SourceIdentifier "procMon" -ErrorAction Stop | Out-Null
+} catch {
+    [System.Windows.MessageBox]::Show("WMI Event failed to start")
+    exit
 }
-catch {
-    Write-Host "[!] WMI event failed to register" -ForegroundColor Red
-    return
-}
 
-Write-Host "[*] Monitoring processes... (Ctrl+C to stop)" -ForegroundColor Green
+# -------------------------
+# Background loop
+# -------------------------
+$job = Start-Job -ScriptBlock {
 
-$lastPopup = Get-Date "2000-01-01"
+    Register-WmiEvent -Class Win32_ProcessStartTrace -SourceIdentifier "procMon" | Out-Null
 
-try {
     while ($true) {
-
         $e = Wait-Event -SourceIdentifier "procMon" -Timeout 5
         if (-not $e) { continue }
 
         $name = $e.SourceEventArgs.NewEvent.ProcessName
-        $pid  = $e.SourceEventArgs.NewEvent.ProcessID
+        $processId = $e.SourceEventArgs.NewEvent.ProcessID
 
-        if ($name -like "*.exe") {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction SilentlyContinue
+        $path = $proc.ExecutablePath
 
-            $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$pid" -ErrorAction SilentlyContinue
-            $path = $proc.ExecutablePath
-
-            if ($path) {
-                $sig = Sig $path
-
-                if (($sig -ne "Valid") -or (BadPath $path)) {
-
-                    $obj = [PSCustomObject]@{
-                        Type = "Process"
-                        Name = $name
-                        Path = $path
-                        Sig  = $sig
-                        Hash = Hash $path
-                    }
-
-                    $results += $obj
-
-                    # throttle popup spam (max once every 5 seconds)
-                    if ((Get-Date) - $lastPopup -gt (New-TimeSpan -Seconds 5)) {
-                        $results | Out-GridView -Title "Live Detection"
-                        $lastPopup = Get-Date
-                    }
-                }
+        if ($path) {
+            [PSCustomObject]@{
+                Type = "Process"
+                Name = $name
+                Path = $path
+                Sig  = (try { (Get-AuthenticodeSignature $path).Status } catch { "Unknown" })
+                Hash = ""
             }
         }
 
         Remove-Event -EventIdentifier $e.EventIdentifier -ErrorAction SilentlyContinue
     }
 }
-finally {
-    Write-Host "`n[*] Cleaning up..." -ForegroundColor Yellow
-    Unregister-Event -SourceIdentifier "procMon" -ErrorAction SilentlyContinue
-}
+
+# -------------------------
+# UI update timer
+# -------------------------
+$timer = New-Object System.Windows.Threading.DispatcherTimer
+$timer.Interval = [TimeSpan]::FromSeconds(2)
+
+$timer.Add_Tick({
+    if ($job -and $job.State -eq "Running") {
+        $output = Receive-Job $job -Keep -ErrorAction SilentlyContinue
+
+        foreach ($item in $output) {
+            if ($item) {
+                $results.Add($item)
+            }
+        }
+    }
+})
+
+$timer.Start()
+
+# -------------------------
+# Start UI
+# -------------------------
+$window.Add_Closing({
+    Stop-Job $job -ErrorAction SilentlyContinue
+    Remove-Job $job -ErrorAction SilentlyContinue
+})
+
+$window.ShowDialog()
