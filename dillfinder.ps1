@@ -1,94 +1,109 @@
 
-$global:filter = ""
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
 
-function Get-ParentMap {
-    $map = @{}
-    Get-CimInstance Win32_Process | ForEach-Object {
-        $map[$_.ProcessId] = $_.ParentProcessId
+# -------------------------
+# CACHE (IMPORTANT FIX)
+# -------------------------
+$cache = @{}
+$view = New-Object System.Collections.ObjectModel.ObservableCollection[object]
+
+# -------------------------
+# UI
+# -------------------------
+[xml]$xaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        Title="TRUE Live Dashboard"
+        Height="700"
+        Width="1100"
+        Background="#1E1E1E">
+
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="35"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <TextBox Name="Filter"
+                 Background="#2D2D30"
+                 Foreground="White"
+                 Height="25"/>
+
+        <DataGrid Name="Grid"
+                  Grid.Row="1"
+                  AutoGenerateColumns="True"
+                  Background="#252526"
+                  Foreground="White"/>
+    </Grid>
+</Window>
+"@
+
+$reader = New-Object System.Xml.XmlNodeReader $xaml
+$window = [Windows.Markup.XamlReader]::Load($reader)
+
+$grid = $window.FindName("Grid")
+$filter = $window.FindName("Filter")
+
+$grid.ItemsSource = $view
+
+# -------------------------
+# PROCESS FETCH
+# -------------------------
+function Get-State($p) {
+
+    $ram = [math]::Round($p.WorkingSet64 / 1MB,2)
+
+    $flag = $false
+
+    if ($ram -gt 500) { $flag = $true }
+    if ($p.ProcessName -match "temp|inject|hack") { $flag = $true }
+
+    return @{
+        Name = $p.ProcessName
+        PID  = $p.Id
+        CPU  = $p.CPU
+        RAM  = $ram
+        Flag = $flag
     }
-    return $map
-}
-
-function Get-Processes {
-    $parents = Get-ParentMap
-
-    Get-Process | ForEach-Object {
-
-        $cpu = 0
-        try { $cpu = $_.CPU } catch {}
-
-        $path = ""
-        try { $path = $_.Path } catch {}
-
-        [PSCustomObject]@{
-            Name   = $_.ProcessName
-            PID    = $_.Id
-            Parent = $parents[$_.Id]
-            CPU    = [math]::Round($cpu,2)
-            RAMMB  = [math]::Round($_.WorkingSet64 / 1MB,2)
-            Path   = $path
-        }
-    }
-}
-
-function Render {
-    Clear-Host
-
-    Write-Host "=== LIVE PROCESS DASHBOARD ===" -ForegroundColor Cyan
-    Write-Host "Filter: $global:filter"
-    Write-Host ""
-
-    $list = Get-Processes
-
-    if ($global:filter -ne "") {
-        $list = $list | Where-Object { $_.Name -like "*$global:filter*" }
-    }
-
-    foreach ($p in $list | Sort-Object CPU -Descending | Select-Object -First 25) {
-
-        $color = "White"
-        if ($p.CPU -gt 50 -or $p.Path -match "temp|appdata|downloads") {
-            $color = "Red"
-        }
-
-        Write-Host (
-            "{0,-20} PID:{1,-6} CPU:{2,-5} RAM:{3,-6}MB Parent:{4}" -f
-            $p.Name, $p.PID, $p.CPU, $p.RAMMB, $p.Parent
-        ) -ForegroundColor $color
-    }
-
-    Write-Host ""
-    Write-Host "[F]ilter | [E]xport | [Q]uit"
-}
-
-function Export {
-    $path = "$env:USERPROFILE\Desktop\process_report.csv"
-    Get-Processes | Export-Csv $path -NoTypeInformation
-    Write-Host "Exported to Desktop" -ForegroundColor Green
 }
 
 # -------------------------
-# MAIN LOOP
+# UPDATE LOOP (FIXED)
 # -------------------------
-while ($true) {
+$timer = New-Object System.Windows.Threading.DispatcherTimer
+$timer.Interval = [TimeSpan]::FromSeconds(1)
 
-    Render
+$timer.Add_Tick({
 
-    if ([console]::KeyAvailable) {
-        $key = [console]::ReadKey($true).Key
+    $current = Get-Process
 
-        switch ($key) {
-            "F" {
-                $global:filter = Read-Host "Enter filter"
-            }
-            "E" {
-                Export
-            }
-            "Q" {
-                break
-            }
+    foreach ($p in $current) {
+
+        $key = $p.Id
+
+        if (-not $cache.ContainsKey($key)) {
+
+            $state = Get-State $p
+            $cache[$key] = $state
+
+            $view.Add($state)
         }
     }
 
-    Start-Sleep -Seconds 1
-}
+    # remove dead processes
+    $alive = $current.Id
+    foreach ($k in @($cache.Keys)) {
+        if ($alive -notcontains $k) {
+            $cache.Remove($k) | Out-Null
+        }
+    }
+
+})
+
+$timer.Start()
+
+# -------------------------
+# SHOW
+# -------------------------
+$window.ShowDialog()
