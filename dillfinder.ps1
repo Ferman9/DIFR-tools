@@ -1,79 +1,55 @@
-# Run as Admin
+# Process Audit Logger (Safe Version)
 
-function Hash($p) {
-try { return (Get-FileHash $p -Algorithm SHA256).Hash } catch { return "" }
-}
-
-function Sig($p) {
-try { return (Get-AuthenticodeSignature $p).Status } catch { return "Unknown" }
-}
-
-function BadPath($p) {
-if (-not $p) { return $false }
-$p = $p.ToLower()
-return ($p -match 'appdata|temp|downloads|desktop')
-}
-
+$logPath = "$env:USERPROFILE\Desktop\proc_log.csv"
 $results = @()
 
-# --- Scan javaw modules (DLL injection traces)
-
-Get-Process javaw -ErrorAction SilentlyContinue | ForEach-Object {
-try {
-$*.Modules | ForEach-Object {
-$p = $*.FileName
-if (-not $p) { return }
-
-```
-        $sig = Sig $p
-        if ($sig -ne "Valid" -or BadPath $p) {
-            $results += [PSCustomObject]@{
-                Type = "DLL"
-                Name = $_.ModuleName
-                Path = $p
-                Sig  = $sig
-                Hash = Hash $p
-            }
-        }
-    }
-} catch {}
-```
-
+function Get-Hash($p) {
+    try { (Get-FileHash $p -Algorithm SHA256).Hash } catch { "" }
 }
 
-# --- Real-time process monitor (WMI)
+function Get-Signature($p) {
+    try { (Get-AuthenticodeSignature $p).Status } catch { "Unknown" }
+}
 
-Register-WmiEvent -Class Win32_ProcessStartTrace -SourceIdentifier "procMon" | Out-Null
+# Create log file header
+if (!(Test-Path $logPath)) {
+    "Time,PID,ParentPID,Name,Path,Signature,Hash" | Out-File $logPath
+}
 
-Write-Host "Monitoring started... open Minecraft now."
+# Track processes
+Register-WmiEvent -Class Win32_ProcessStartTrace -SourceIdentifier "procStart" | Out-Null
+
+Write-Host "Process audit started..."
 
 while ($true) {
-$e = Wait-Event -SourceIdentifier "procMon"
-$name = $e.SourceEventArgs.NewEvent.ProcessName
+    $event = Wait-Event -SourceIdentifier "procStart"
 
-```
-if ($name -like "*.exe") {
-    $proc = Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -eq $e.SourceEventArgs.NewEvent.ProcessID }
-    $path = $proc.ExecutablePath
+    $pid = $event.SourceEventArgs.NewEvent.ProcessID
+    $ppid = $event.SourceEventArgs.NewEvent.ParentProcessID
+    $name = $event.SourceEventArgs.NewEvent.ProcessName
 
-    if ($path) {
-        $sig = Sig $path
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$pid"
 
-        if ($sig -ne "Valid" -or BadPath $path) {
-            $results += [PSCustomObject]@{
-                Type = "Process"
-                Name = $name
-                Path = $path
-                Sig  = $sig
-                Hash = Hash $path
-            }
+    if ($proc) {
+        $path = $proc.ExecutablePath
+        $sig = Get-Signature $path
+        $hash = Get-Hash $path
 
-            $results | Out-GridView -Title "Live Detection"
+        $entry = [PSCustomObject]@{
+            Time = Get-Date
+            PID = $pid
+            ParentPID = $ppid
+            Name = $name
+            Path = $path
+            Signature = $sig
+            Hash = $hash
         }
+
+        $results += $entry
+
+        # append to CSV
+        "$($entry.Time),$pid,$ppid,$name,$path,$sig,$hash" | Add-Content $logPath
     }
-}
 
-Remove-Event -EventIdentifier $e.EventIdentifier
-```
-
+    Remove-Event -EventIdentifier $event.EventIdentifier
 }
