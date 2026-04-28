@@ -1,123 +1,148 @@
 
-Add-Type -AssemblyName PresentationFramework
-Add-Type -AssemblyName PresentationCore
-Add-Type -AssemblyName WindowsBase
+$global:filter = ""
 
-# -------------------------
-# DATA
-# -------------------------
-$view = New-Object System.Collections.ObjectModel.ObservableCollection[object]
-
-# -------------------------
-# SUSPICION RULES
-# -------------------------
-function Is-SuspiciousDLL($path, $sig) {
-
-    if (-not $path) { return $false }
-
-    $p = $path.ToLower()
-
-    return (
-        $sig -ne "Valid" -or
-        $p -match "temp|appdata|downloads|inject|hack|cheat" -or
-        $p -notmatch "windows\\system32|program files"
-    )
+function Get-ParentMap {
+    $map = @{}
+    Get-CimInstance Win32_Process | ForEach-Object {
+        $map[$_.ProcessId] = $_.ParentProcessId
+    }
+    return $map
 }
 
 # -------------------------
-# UI
+# DLL DETECTION (NEW)
 # -------------------------
-[xml]$xaml = @"
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        Title="Javaw DLL Monitor"
-        Height="700"
-        Width="1100"
-        Background="#1E1E1E">
+function Get-SuspiciousDLLs {
 
-    <Grid Margin="10">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="30"/>
-            <RowDefinition Height="*"/>
-        </Grid.RowDefinitions>
-
-        <TextBlock Name="Status"
-                   Foreground="LightGreen"
-                   Text="Monitoring javaw..."
-                   FontSize="14"/>
-
-        <DataGrid Name="Grid"
-                  Grid.Row="1"
-                  AutoGenerateColumns="True"
-                  Background="#252526"
-                  Foreground="White"/>
-    </Grid>
-</Window>
-"@
-
-$reader = New-Object System.Xml.XmlNodeReader $xaml
-$window = [Windows.Markup.XamlReader]::Load($reader)
-
-$grid = $window.FindName("Grid")
-$status = $window.FindName("Status")
-
-$grid.ItemsSource = $view
-
-# -------------------------
-# SCAN FUNCTION
-# -------------------------
-function Scan-JavawDLL {
-
-    $view.Clear()
+    $suspicious = @()
 
     $java = Get-Process javaw -ErrorAction SilentlyContinue
 
-    if (-not $java) {
-        $status.Text = "javaw not running"
-        return
-    }
-
     foreach ($j in $java) {
-
         try {
             $j.Modules | ForEach-Object {
 
                 $path = $_.FileName
                 if (-not $path) { return }
 
-                $sig = try {
-                    (Get-AuthenticodeSignature $path).Status
-                } catch {
-                    "Unknown"
+                $p = $path.ToLower()
+
+                if (
+                    $p -match "temp|appdata|downloads|inject|hack|cheat" -or
+                    -not $p.Contains("windows") -or
+                    -not $p.Contains("program files")
+                ) {
+                    $suspicious += [PSCustomObject]@{
+                        Process = "javaw"
+                        DLL     = $_.ModuleName
+                        Path    = $path
+                    }
                 }
-
-                $suspicious = Is-SuspiciousDLL $path $sig
-
-                $view.Add([PSCustomObject]@{
-                    Process = "javaw"
-                    DLL     = $_.ModuleName
-                    Path    = $path
-                    Sig     = $sig
-                    Flag    = if ($suspicious) { "SUSPICIOUS" } else { "OK" }
-                })
             }
+        } catch {}
+    }
+
+    return $suspicious
+}
+
+function Get-Processes {
+    $parents = Get-ParentMap
+
+    Get-Process | ForEach-Object {
+
+        $cpu = 0
+        try { $cpu = $_.CPU } catch {}
+
+        $path = ""
+        try { $path = $_.Path } catch {}
+
+        [PSCustomObject]@{
+            Name   = $_.ProcessName
+            PID    = $_.Id
+            Parent = $parents[$_.Id]
+            CPU    = [math]::Round($cpu,2)
+            RAMMB  = [math]::Round($_.WorkingSet64 / 1MB,2)
+            Path   = $path
         }
-        catch {}
     }
 }
 
-# -------------------------
-# LIVE TIMER
-# -------------------------
-$timer = New-Object System.Windows.Threading.DispatcherTimer
-$timer.Interval = [TimeSpan]::FromSeconds(2)
+function Render {
+    Clear-Host
 
-$timer.Add_Tick({
-    Scan-JavawDLL
-})
+    Write-Host "=== LIVE PROCESS DASHBOARD ===" -ForegroundColor Cyan
+    Write-Host "Filter: $global:filter"
+    Write-Host ""
 
-$timer.Start()
+    $list = Get-Processes
+
+    if ($global:filter -ne "") {
+        $list = $list | Where-Object { $_.Name -like "*$global:filter*" }
+    }
+
+    $dlls = Get-SuspiciousDLLs
+
+    Write-Host "=== SUSPICIOUS JAVA DLLS ===" -ForegroundColor Yellow
+    if ($dlls.Count -eq 0) {
+        Write-Host "None detected"
+    } else {
+        foreach ($d in $dlls) {
+            Write-Host "$($d.Process) -> $($d.DLL)" -ForegroundColor Red
+        }
+    }
+
+    Write-Host ""
+    Write-Host "=== TOP PROCESSES ===" -ForegroundColor Cyan
+
+    foreach ($p in $list | Sort-Object CPU -Descending | Select-Object -First 25) {
+
+        $color = "White"
+
+        if (
+            $p.CPU -gt 50 -or
+            $p.Path -match "temp|appdata|downloads"
+        ) {
+            $color = "Red"
+        }
+
+        Write-Host (
+            "{0,-20} PID:{1,-6} CPU:{2,-6} RAM:{3,-6}MB Parent:{4}" -f
+            $p.Name, $p.PID, $p.CPU, $p.RAMMB, $p.Parent
+        ) -ForegroundColor $color
+    }
+
+    Write-Host ""
+    Write-Host "[F]ilter | [E]xport | [Q]uit"
+}
+
+function Export {
+    $path = "$env:USERPROFILE\Desktop\process_report.csv"
+    Get-Processes | Export-Csv $path -NoTypeInformation
+    Write-Host "Exported to Desktop" -ForegroundColor Green
+}
 
 # -------------------------
-# SHOW UI
+# MAIN LOOP
 # -------------------------
-$window.ShowDialog()
+while ($true) {
+
+    Render
+
+    if ([console]::KeyAvailable) {
+        $key = [console]::ReadKey($true).Key
+
+        switch ($key) {
+            "F" {
+                $global:filter = Read-Host "Enter filter"
+            }
+            "E" {
+                Export
+            }
+            "Q" {
+                break
+            }
+        }
+    }
+
+    Start-Sleep -Seconds 1
+}
