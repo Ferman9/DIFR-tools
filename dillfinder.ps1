@@ -4,31 +4,46 @@ Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 
 # -------------------------
-# CACHE (IMPORTANT FIX)
+# DATA
 # -------------------------
-$cache = @{}
 $view = New-Object System.Collections.ObjectModel.ObservableCollection[object]
+
+# -------------------------
+# SUSPICION RULES
+# -------------------------
+function Is-SuspiciousDLL($path, $sig) {
+
+    if (-not $path) { return $false }
+
+    $p = $path.ToLower()
+
+    return (
+        $sig -ne "Valid" -or
+        $p -match "temp|appdata|downloads|inject|hack|cheat" -or
+        $p -notmatch "windows\\system32|program files"
+    )
+}
 
 # -------------------------
 # UI
 # -------------------------
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        Title="TRUE Live Dashboard"
+        Title="Javaw DLL Monitor"
         Height="700"
         Width="1100"
         Background="#1E1E1E">
 
     <Grid Margin="10">
         <Grid.RowDefinitions>
-            <RowDefinition Height="35"/>
+            <RowDefinition Height="30"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
-        <TextBox Name="Filter"
-                 Background="#2D2D30"
-                 Foreground="White"
-                 Height="25"/>
+        <TextBlock Name="Status"
+                   Foreground="LightGreen"
+                   Text="Monitoring javaw..."
+                   FontSize="14"/>
 
         <DataGrid Name="Grid"
                   Grid.Row="1"
@@ -43,67 +58,66 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $grid = $window.FindName("Grid")
-$filter = $window.FindName("Filter")
+$status = $window.FindName("Status")
 
 $grid.ItemsSource = $view
 
 # -------------------------
-# PROCESS FETCH
+# SCAN FUNCTION
 # -------------------------
-function Get-State($p) {
+function Scan-JavawDLL {
 
-    $ram = [math]::Round($p.WorkingSet64 / 1MB,2)
+    $view.Clear()
 
-    $flag = $false
+    $java = Get-Process javaw -ErrorAction SilentlyContinue
 
-    if ($ram -gt 500) { $flag = $true }
-    if ($p.ProcessName -match "temp|inject|hack") { $flag = $true }
+    if (-not $java) {
+        $status.Text = "javaw not running"
+        return
+    }
 
-    return @{
-        Name = $p.ProcessName
-        PID  = $p.Id
-        CPU  = $p.CPU
-        RAM  = $ram
-        Flag = $flag
+    foreach ($j in $java) {
+
+        try {
+            $j.Modules | ForEach-Object {
+
+                $path = $_.FileName
+                if (-not $path) { return }
+
+                $sig = try {
+                    (Get-AuthenticodeSignature $path).Status
+                } catch {
+                    "Unknown"
+                }
+
+                $suspicious = Is-SuspiciousDLL $path $sig
+
+                $view.Add([PSCustomObject]@{
+                    Process = "javaw"
+                    DLL     = $_.ModuleName
+                    Path    = $path
+                    Sig     = $sig
+                    Flag    = if ($suspicious) { "SUSPICIOUS" } else { "OK" }
+                })
+            }
+        }
+        catch {}
     }
 }
 
 # -------------------------
-# UPDATE LOOP (FIXED)
+# LIVE TIMER
 # -------------------------
 $timer = New-Object System.Windows.Threading.DispatcherTimer
-$timer.Interval = [TimeSpan]::FromSeconds(1)
+$timer.Interval = [TimeSpan]::FromSeconds(2)
 
 $timer.Add_Tick({
-
-    $current = Get-Process
-
-    foreach ($p in $current) {
-
-        $key = $p.Id
-
-        if (-not $cache.ContainsKey($key)) {
-
-            $state = Get-State $p
-            $cache[$key] = $state
-
-            $view.Add($state)
-        }
-    }
-
-    # remove dead processes
-    $alive = $current.Id
-    foreach ($k in @($cache.Keys)) {
-        if ($alive -notcontains $k) {
-            $cache.Remove($k) | Out-Null
-        }
-    }
-
+    Scan-JavawDLL
 })
 
 $timer.Start()
 
 # -------------------------
-# SHOW
+# SHOW UI
 # -------------------------
 $window.ShowDialog()
