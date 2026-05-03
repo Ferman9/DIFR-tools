@@ -1,41 +1,15 @@
-# 🔍 Discord Alt Finder
+🔍 DLL Cheat Finder
 
-A lightweight and efficient tool designed to identify potential alternate accounts (“alts”) on Discord using intelligent pattern analysis and data correlation.
+A lightweight and efficient tool designed to detect unauthorized or malicious DLL-based cheats by scanning system processes, memory, and injection patterns.
 
-## 🚀 Features
-
-* **User Matching Algorithms** – Detects similarities across usernames, IDs, and behavioral patterns
-* **IP & Session Analysis (optional)** – Correlates login data where available
-* **Server Activity Tracking** – Compares message activity, join times, and interaction patterns
-* **Custom Rules Engine** – Define your own criteria for flagging potential alts
-* **Fast & Scalable** – Built to handle large Discord servers with minimal performance impact
-
-## 🛠️ Use Cases
-
-* Moderation and anti-ban evasion enforcement
-* Community management and trust & safety workflows
-* Investigative analysis for suspicious account behavior
-
-## ⚠️ Disclaimer
-
-This tool is intended for **educational and moderation purposes only**. Accuracy is not guaranteed, and false positives may occur. Always verify results manually before taking action.
-
-## 📦 Installation
-
-```bash
-git clone https://github.com/yourusername/discord-alt-finder.git
-cd discord-alt-finder
-npm install
-```
-
-## ▶️ Usage
-
-```bash
-npm start
-```
-
-Configure your settings in the `.env` file and define detection rules as needed.
-
-## 📄 License
-
-MIT License
+🚀 Features
+DLL Injection Detection – Identifies suspicious or manually injected dynamic-link libraries in running processes
+Signature & Heuristic Analysis – Flags known cheat DLLs and detects unknown ones using behavior patterns
+Process Monitoring – Scans active processes for abnormal module loading and hidden injections
+Custom Rules Engine – Define your own detection rules for specific DLL names, hashes, or behaviors
+Fast & Scalable – Optimized for real-time scanning with minimal system impact
+🛠️ Use Cases
+Anti-cheat systems and game integrity enforcement
+Malware and unauthorized software detection
+Reverse engineering and security research
+System auditing for suspicious DLL activity
