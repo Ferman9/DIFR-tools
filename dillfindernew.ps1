@@ -19,5 +19,5 @@ try {
 catch {
 }
 finally {
-    Write-Output "Done"
+    Write-Output "Parsing Dll's This may take a while"
 }
