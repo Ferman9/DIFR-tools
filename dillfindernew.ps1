@@ -76,4 +76,4 @@ Invoke-DLLHelper *> $null
 Get-SuspiciousDLLs *> $null
 Get-ParentMap *> $null
 
-Write-Host "dlls parsed"
+Write-Host "dlls parsed No Sus Dlls found, User has been found clean"
